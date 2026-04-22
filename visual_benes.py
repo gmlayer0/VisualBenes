@@ -66,7 +66,7 @@ class ColorManager:
         # 如果超出基础色板数量，通过调整亮度生成新颜色
         if index >= len(cls.COLORS_16):
             cycle = index // len(cls.COLORS_16)
-            factor = 1.0 - (cycle * 0.1)  # 每次循环降低亮度
+            factor = 1.0 - (cycle * 0.25)  # 每次循环降低亮度
             factor = max(factor, 0.5)  # 最低亮度限制
 
             h, s, v, a = color.getHsv()
@@ -106,7 +106,7 @@ class Port:
         self.endpoint = Endpoint(self, "output" if is_input else "input", port_idx)
         self.x: float = 0.0
         self.y: float = 0.0
-        self.radius: float = 14.0
+        self.radius: float = 4.0
 
     def endpoints(self) -> List[Endpoint]:
         return [self.endpoint]
@@ -240,9 +240,9 @@ class LayoutCalculator:
         avail_height = max(height - 2 * self.margin, 200)
 
         # 动态计算间距，确保不溢出
-        min_spacing = 40.0
-        vertical_spacing = avail_height / (max_vertical + 1)
-        vertical_spacing = max(vertical_spacing, min_spacing)
+        # vertical_spacing = avail_height / (max_vertical + 1)
+        # vertical_spacing = max(vertical_spacing, min_spacing)
+        vertical_spacing = 30.0
 
         # 计算级间距
         stage_x = []
@@ -282,17 +282,17 @@ class LayoutCalculator:
                     switch.y = switch_start_y + switch_idx * 2 * vertical_spacing
                     switch.x = x
 
-                    # 计算端点坐标
+                    # 计算端点坐标 - 与输入输出端口对齐
                     half_h = switch.height / 2
                     switch.inputs[0].x = x - switch.width / 2
-                    switch.inputs[0].y = switch.y - half_h * 0.6
+                    switch.inputs[0].y = switch.y - half_h * 0.75
                     switch.inputs[1].x = x - switch.width / 2
-                    switch.inputs[1].y = switch.y + half_h * 0.6
+                    switch.inputs[1].y = switch.y + half_h * 0.75
 
                     switch.outputs[0].x = x + switch.width / 2
-                    switch.outputs[0].y = switch.y - half_h * 0.6
+                    switch.outputs[0].y = switch.y - half_h * 0.75
                     switch.outputs[1].x = x + switch.width / 2
-                    switch.outputs[1].y = switch.y + half_h * 0.6
+                    switch.outputs[1].y = switch.y + half_h * 0.75
 
 
 # =============================================================================
@@ -375,6 +375,39 @@ class BenesTopologyBuilder:
         return (j >> 1) | ((j & 1) << (m - 1))
 
     @classmethod
+    def recursive_build(cls, topology: NetworkTopology, N: int, stage_start: int, switch_start: int):
+        if N == 2:
+            return
+        k = int(math.log2(N))
+        s = k * 2 - 1
+        # 输入级连线
+        for i in range(N // 2):
+            for p in range(2):
+                idx = i * 2 + p
+                in_idx = cls.perfect_shuffle(idx, k)
+                in_m = in_idx // 2
+                in_p = in_idx % 2
+                topology.add_connection(
+                    topology.stages[stage_start][switch_start + in_m].outputs[in_p],
+                    topology.stages[stage_start+1][switch_start + i].inputs[p]
+                )
+        # 中间级上半连线
+        cls.recursive_build(topology, N // 2, stage_start + 1, switch_start = switch_start)
+        # 中间级下半连线
+        cls.recursive_build(topology, N // 2, stage_start + 1, switch_start = switch_start + N // 4)
+        # 输出级连线
+        for i in range(N // 2):
+            for p in range(2):
+                idx = i * 2 + p
+                in_idx = cls.inverse_perfect_shuffle(idx, k)
+                in_m = in_idx // 2
+                in_p = in_idx % 2
+                topology.add_connection(
+                    topology.stages[stage_start + s - 2][switch_start + in_m].outputs[in_p],
+                    topology.stages[stage_start + s - 1][switch_start + i].inputs[p]
+                )
+
+    @classmethod
     def build(cls, N: int) -> NetworkTopology:
         """构建 Benes 网络拓扑 - 使用简化的直连模式演示"""
         if not (N > 0 and (N & (N - 1)) == 0):
@@ -406,36 +439,9 @@ class BenesTopologyBuilder:
             topology.add_connection(topology.input_ports[2*i].endpoint, topology.stages[0][i].inputs[0])
             topology.add_connection(topology.input_ports[2*i+1].endpoint, topology.stages[0][i].inputs[1])
 
-        # 连接级间（直连模式，作为基础演示）
-        # 同时也加入一些洗牌连接来演示
-        for s in range(num_stages - 1):
-            curr_stage = topology.stages[s]
-            next_stage = topology.stages[s + 1]
-
-            M = N
-            if s < k - 1:
-                # 前半部分用洗牌连接
-                m = k - s
-                M = 1 << m
-                num_blocks = N // M
-
-                for block in range(num_blocks):
-                    block_start = block * (M // 2)
-                    src_eps = []
-                    for i in range(M // 2):
-                        src_eps.append(curr_stage[block_start + i].outputs[0])
-                        src_eps.append(curr_stage[block_start + i].outputs[1])
-
-                    for j in range(M):
-                        shuffled_j = cls.perfect_shuffle(j, int(math.log2(M)))
-                        dst_sw = block_start + (shuffled_j // 2)
-                        dst_port = shuffled_j % 2
-                        topology.add_connection(src_eps[j], next_stage[dst_sw].inputs[dst_port])
-            else:
-                # 后半部分用逆洗牌或直连
-                for i in range(switches_per_stage):
-                    topology.add_connection(curr_stage[i].outputs[0], next_stage[i].inputs[0])
-                    topology.add_connection(curr_stage[i].outputs[1], next_stage[i].inputs[1])
+        # 中间级
+        if N > 2:
+            cls.recursive_build(topology, N, 0, 0)
 
         # 连接最后一级到输出
         for i in range(switches_per_stage):
@@ -541,9 +547,9 @@ class PortGraphicsItem(QGraphicsEllipseItem):
         """更新外观"""
         # 使用渐变色
         if self.port.is_input:
-            base_color = QColor(70, 130, 180)  # 钢蓝色
+            base_color = QColor(0, 0, 0)  # 钢蓝色
         else:
-            base_color = QColor(60, 179, 113)   # 海绿色
+            base_color = QColor(200, 200, 200)   # 海绿色
 
         self.setBrush(QBrush(base_color))
         self.setPen(QPen(QColor(40, 40, 40), 2))
@@ -613,7 +619,7 @@ class SwitchGraphicsItem(QGraphicsItem):
 
         # 绘制内部状态指示线
         painter.setPen(QPen(arrow_color, 2.5))
-        half_h = h * 0.3
+        half_h = h * 0.35  # 调整比例适配更高的开关
 
         if self.switch.state == 0:
             # 直通状态：两条平行线
@@ -712,7 +718,7 @@ class PortLabelItem(QGraphicsTextItem):
     def __init__(self, text: str, parent=None):
         super().__init__(text, parent)
         font = QFont()
-        font.setPointSize(11)
+        font.setPointSize(14)
         font.setBold(True)
         self.setFont(font)
         self.setDefaultTextColor(Qt.black)
@@ -825,10 +831,10 @@ class NetworkGraphicsView(QGraphicsView):
 
         # 水平方向：使用视图宽度，不滚动
         viewport_rect = self.viewport().rect()
-        width = max(viewport_rect.width(), 400)
+        width = viewport_rect.width()
 
         # 垂直方向：根据元素数量计算高度，支持滚动
-        min_height = 200 + max(num_inputs, num_outputs) * 55
+        min_height = max(num_inputs, num_outputs) * 30
         height = max(viewport_rect.height(), min_height)
 
         # 计算布局
@@ -851,7 +857,7 @@ class NetworkGraphicsView(QGraphicsView):
             label = self.input_label_items[i]
             # 输入标签放在输入节点右边，往上一点避免重叠
             label.setPos(port.x + port.radius + 8, port.y - 18)
-            label.setPlainText(f"{i}")
+            label.setPlainText(f"{i:02d}")
             label.setDefaultTextColor(QColor(0, 0, 0))  # 黑色
 
         for i, port in enumerate(self.topology.output_ports):
@@ -902,7 +908,7 @@ class NetworkGraphicsView(QGraphicsView):
             # 如果还是找不到，显示 0 作为默认
             if source < 0:
                 source = 0
-            self.output_label_items[i].setPlainText(f"{source}")
+            self.output_label_items[i].setPlainText(f"{source:02d}")
             self.output_label_items[i].setDefaultTextColor(QColor(0, 0, 0))  # 黑色
 
     def resizeEvent(self, event):
@@ -969,7 +975,7 @@ class MainWindow(QMainWindow):
         self.benes_size_combo = QComboBox()
         for n in [2, 4, 8, 16, 32, 64]:
             self.benes_size_combo.addItem(f"N = {n}", n)
-        self.benes_size_combo.setCurrentIndex(2)  # 默认 N=8
+        self.benes_size_combo.setCurrentIndex(4)  # 默认 N=32
         self.benes_size_combo.currentIndexChanged.connect(self._on_benes_size_changed)
         benes_layout.addRow("网络规模:", self.benes_size_combo)
         self.benes_group.setLayout(benes_layout)
@@ -993,7 +999,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.generic_group)
 
         # 控制位操作
-        control_bits_group = QGroupBox("控制位操作")
+        control_bits_group = QGroupBox("控制位操作（大端序）")
         control_bits_layout = QVBoxLayout()
         self.control_bits_text = QTextEdit()
         self.control_bits_text.setMaximumHeight(80)
