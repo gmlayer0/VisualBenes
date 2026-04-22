@@ -25,7 +25,8 @@ from PyQt5.QtGui import QColor, QPen, QBrush, QPainter, QFont, QPainterPath, QRa
 class ColorManager:
     """颜色管理器，为输入端口分配高区分度的固定颜色"""
 
-    # 扩展到 16 种高区分度颜色
+class ColorManager:
+    # 16 种高区分度基础色（基于 Tableau 20 精选）
     COLORS_16 = [
         QColor(31, 119, 180),   # 蓝色
         QColor(255, 127, 14),   # 橙色
@@ -46,13 +47,13 @@ class ColorManager:
     ]
 
     @classmethod
-    def get_color(cls, index: int, total: int) -> QColor:
+    def get_color(cls, index: int, total: int = 0) -> QColor:
         """
-        获取指定索引的颜色
+        获取指定索引的高区分度颜色（支持任意索引）
 
         Args:
-            index: 输入端口索引 (0-based)
-            total: 总输入端口数量
+            index: 输入端口索引 (0‑based)，负数返回灰色
+            total: 总数量（保留参数，兼容旧版）
 
         Returns:
             对应的 QColor
@@ -60,20 +61,32 @@ class ColorManager:
         if index < 0:
             return QColor(180, 180, 180)  # 灰色表示未使用
 
-        base_idx = index % len(cls.COLORS_16)
-        color = cls.COLORS_16[base_idx]
+        base_count = len(cls.COLORS_16)
+        base_idx = index % base_count
+        base_color = cls.COLORS_16[base_idx]
 
-        # 如果超出基础色板数量，通过调整亮度生成新颜色
-        if index >= len(cls.COLORS_16):
-            cycle = index // len(cls.COLORS_16)
-            factor = 1.0 - (cycle * 0.25)  # 每次循环降低亮度
-            factor = max(factor, 0.5)  # 最低亮度限制
+        # 仍在基础色板内，直接返回
+        if index < base_count:
+            return base_color
 
-            h, s, v, a = color.getHsv()
-            v = int(v * factor)
-            color = QColor.fromHsv(h, s, v, a)
+        # 超出基础色板：通过色相旋转和微调生成新颜色
+        cycle = index // base_count
+        h, s, v, a = base_color.getHsv()
 
-        return color
+        # 色相偏移：每次循环增加 27°（与 360° 无公因数，避免重复）
+        hue_offset = (cycle * 27) % 360
+        h = (h + hue_offset) % 360
+
+        # 饱和度微调：奇数循环轻微降低饱和度，增加层次感
+        if cycle % 2 == 1:
+            s = min(255, int(s * 0.9))
+        else:
+            s = min(255, int(s * 1.1))
+
+        # 亮度微调：保证颜色清晰可见
+        v = min(255, int(v * (1.0 - (cycle % 3) * 0.05)))
+
+        return QColor.fromHsv(h, s, v, a)
 
 
 # =============================================================================
@@ -999,11 +1012,11 @@ class MainWindow(QMainWindow):
         layout.addWidget(self.generic_group)
 
         # 控制位操作
-        control_bits_group = QGroupBox("控制位操作（大端序）")
+        control_bits_group = QGroupBox("控制位操作")
         control_bits_layout = QVBoxLayout()
         self.control_bits_text = QTextEdit()
         self.control_bits_text.setMaximumHeight(80)
-        self.control_bits_text.setPlaceholderText("输入二进制字符串 (例如: 010101)")
+        self.control_bits_text.setPlaceholderText("输入二进制控制位字符串，注意使用大端序")
         control_bits_layout.addWidget(self.control_bits_text)
 
         bits_button_layout = QHBoxLayout()
