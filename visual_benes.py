@@ -485,6 +485,14 @@ class BenesTopologyBuilder:
 class ButterflyTopologyBuilder:
     """Butterfly 网络拓扑生成器 - 保留 Benes 网络的前半部分"""
 
+    @staticmethod
+    def bit_reverse(value: int, width: int) -> int:
+        result = 0
+        for _ in range(width):
+            result = (result << 1) | (value & 1)
+            value >>= 1
+        return result
+
     @classmethod
     def recursive_build(cls, topology: NetworkTopology, N: int, stage_start: int, switch_start: int):
         if N == 2:
@@ -537,8 +545,13 @@ class ButterflyTopologyBuilder:
             cls.recursive_build(topology, N, 0, 0)
 
         for i in range(switches_per_stage):
-            topology.add_connection(topology.stages[-1][i].outputs[0], topology.output_ports[2*i].endpoint)
-            topology.add_connection(topology.stages[-1][i].outputs[1], topology.output_ports[2*i+1].endpoint)
+            for p in range(2):
+                internal_lane = 2 * i + p
+                output_lane = cls.bit_reverse(internal_lane, k)
+                topology.add_connection(
+                    topology.stages[-1][i].outputs[p],
+                    topology.output_ports[output_lane].endpoint
+                )
 
         return topology
 
