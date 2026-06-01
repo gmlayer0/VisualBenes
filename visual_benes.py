@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 多级互连网络可视化程序
-包含通用多级开关网络框架和 Benes 网络专用拓扑实现
+包含 Benes 网络和 Butterfly 网络拓扑实现
 """
 
 import math
@@ -10,7 +10,7 @@ import random
 from typing import List, Tuple, Dict, Optional, Callable
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-    QSpinBox, QPushButton, QLabel, QComboBox, QTextEdit, QGroupBox,
+    QPushButton, QLabel, QComboBox, QTextEdit, QGroupBox,
     QFormLayout, QGraphicsItem, QGraphicsEllipseItem, QGraphicsLineItem,
     QGraphicsTextItem, QGraphicsScene, QGraphicsView, QGraphicsRectItem
 )
@@ -171,6 +171,19 @@ class SwitchNode:
             output_idx = 1 - input_idx
         return output_idx, self.outputs[output_idx]
 
+    def get_outputs_for_input(self, input_idx: int, broadcast: bool = False) -> List[Endpoint]:
+        """
+        根据开关状态，获取输入端口对应的输出端口列表。
+
+        broadcast 模式下，state=0 选择上方输入，state=1 选择下方输入，
+        被选中的输入同时驱动两个输出。
+        """
+        if broadcast:
+            return self.outputs if input_idx == self.state else []
+
+        _, output_ep = self.get_output_for_input(input_idx)
+        return [output_ep]
+
 
 class Connection:
     """连接类，表示两个端点之间的连线"""
@@ -316,12 +329,13 @@ class DataFlowPropagator:
     """数据流传播器，根据开关状态计算数据流"""
 
     @staticmethod
-    def propagate(topology: NetworkTopology):
+    def propagate(topology: NetworkTopology, broadcast: bool = False):
         """
         传播数据流：从输入端口开始，根据开关状态追踪数据流向
 
         Args:
             topology: 网络拓扑
+            broadcast: 是否使用广播开关语义
         """
         # 重置所有连接的数据源
         for conn in topology.connections:
@@ -360,8 +374,8 @@ class DataFlowPropagator:
                         # 目标是开关，根据开关状态决定输出
                         switch = dst_owner
                         input_idx = conn.dst.port_idx
-                        output_idx, output_ep = switch.get_output_for_input(input_idx)
-                        stack.append((output_ep, data_src))
+                        for output_ep in switch.get_outputs_for_input(input_idx, broadcast):
+                            stack.append((output_ep, data_src))
 
                     elif isinstance(dst_owner, Port):
                         # 目标是输出端口，传播结束
@@ -465,79 +479,66 @@ class BenesTopologyBuilder:
 
 
 # =============================================================================
-# 通用网络拓扑生成器
+# Butterfly 网络拓扑生成器
 # =============================================================================
 
-class GenericTopologyBuilder:
-    """通用多级网络拓扑生成器"""
+class ButterflyTopologyBuilder:
+    """Butterfly 网络拓扑生成器 - 保留 Benes 网络的前半部分"""
 
-    @staticmethod
-    def build_straight_through(
-        num_stages: int,
-        switches_per_stage: int,
-        num_inputs: Optional[int] = None
-    ) -> NetworkTopology:
-        """
-        构建直连模式的通用网络
+    @classmethod
+    def recursive_build(cls, topology: NetworkTopology, N: int, stage_start: int, switch_start: int):
+        if N == 2:
+            return
 
-        Args:
-            num_stages: 级数
-            switches_per_stage: 每级开关数量
-            num_inputs: 输入端口数量（默认为 2*switches_per_stage）
+        k = int(math.log2(N))
+        for i in range(N // 2):
+            for p in range(2):
+                idx = i * 2 + p
+                in_idx = BenesTopologyBuilder.perfect_shuffle(idx, k)
+                in_m = in_idx // 2
+                in_p = in_idx % 2
+                topology.add_connection(
+                    topology.stages[stage_start][switch_start + in_m].outputs[in_p],
+                    topology.stages[stage_start + 1][switch_start + i].inputs[p]
+                )
 
-        Returns:
-            构建好的 NetworkTopology
-        """
-        if num_inputs is None:
-            num_inputs = 2 * switches_per_stage
+        cls.recursive_build(topology, N // 2, stage_start + 1, switch_start)
+        cls.recursive_build(topology, N // 2, stage_start + 1, switch_start + N // 4)
 
-        num_outputs = num_inputs
+    @classmethod
+    def build(cls, N: int) -> NetworkTopology:
+        """构建 Butterfly 网络拓扑"""
+        if not (N > 0 and (N & (N - 1)) == 0):
+            raise ValueError("N 必须是 2 的幂")
+
+        k = int(math.log2(N))
+        num_stages = k
+        switches_per_stage = N // 2
 
         topology = NetworkTopology()
 
-        # 创建输入端口
-        for i in range(num_inputs):
+        for i in range(N):
             topology.input_ports.append(Port(i, is_input=True))
 
-        # 创建输出端口
-        for i in range(num_outputs):
+        for i in range(N):
             topology.output_ports.append(Port(i, is_input=False))
 
-        # 创建各级开关
         for s in range(num_stages):
             stage = []
             for i in range(switches_per_stage):
                 stage.append(SwitchNode(s, i))
             topology.add_stage(stage)
 
-        # 连接输入到第一级
-        for i in range(min(switches_per_stage * 2, num_inputs)):
-            switch_idx = i // 2
-            port_idx = i % 2
-            if switch_idx < len(topology.stages[0]):
-                topology.add_connection(
-                    topology.input_ports[i].endpoint,
-                    topology.stages[0][switch_idx].inputs[port_idx]
-                )
+        for i in range(switches_per_stage):
+            topology.add_connection(topology.input_ports[2*i].endpoint, topology.stages[0][i].inputs[0])
+            topology.add_connection(topology.input_ports[2*i+1].endpoint, topology.stages[0][i].inputs[1])
 
-        # 连接级间（直连模式）
-        for s in range(num_stages - 1):
-            curr_stage = topology.stages[s]
-            next_stage = topology.stages[s + 1]
-            for i in range(min(len(curr_stage), len(next_stage))):
-                topology.add_connection(curr_stage[i].outputs[0], next_stage[i].inputs[0])
-                topology.add_connection(curr_stage[i].outputs[1], next_stage[i].inputs[1])
+        if N > 2:
+            cls.recursive_build(topology, N, 0, 0)
 
-        # 连接最后一级到输出
-        last_stage = topology.stages[-1]
-        for i in range(min(switches_per_stage * 2, num_outputs)):
-            switch_idx = i // 2
-            port_idx = i % 2
-            if switch_idx < len(last_stage):
-                topology.add_connection(
-                    last_stage[switch_idx].outputs[port_idx],
-                    topology.output_ports[i].endpoint
-                )
+        for i in range(switches_per_stage):
+            topology.add_connection(topology.stages[-1][i].outputs[0], topology.output_ports[2*i].endpoint)
+            topology.add_connection(topology.stages[-1][i].outputs[1], topology.output_ports[2*i+1].endpoint)
 
         return topology
 
@@ -763,6 +764,7 @@ class NetworkGraphicsView(QGraphicsView):
         self.input_label_items: List[PortLabelItem] = []
         self.output_label_items: List[PortLabelItem] = []
         self._stats_callback: Optional[Callable] = None
+        self.broadcast_mode = False
 
         self.layout = LayoutCalculator()
 
@@ -779,6 +781,11 @@ class NetworkGraphicsView(QGraphicsView):
         """设置拓扑并重建图形项"""
         self.topology = topology
         self._rebuild_scene()
+
+    def set_broadcast_mode(self, enabled: bool):
+        """设置 broadcast 显示语义"""
+        self.broadcast_mode = enabled
+        self.update_data_flow()
 
     def _rebuild_scene(self):
         """重建场景中的所有图形项"""
@@ -887,7 +894,7 @@ class NetworkGraphicsView(QGraphicsView):
             return
 
         # 传播数据流
-        DataFlowPropagator.propagate(self.topology)
+        DataFlowPropagator.propagate(self.topology, self.broadcast_mode)
 
         # 更新连线颜色
         num_inputs = len(self.topology.input_ports)
@@ -976,14 +983,14 @@ class MainWindow(QMainWindow):
         type_layout = QVBoxLayout()
         self.network_type_combo = QComboBox()
         self.network_type_combo.addItem("Benes 网络", "benes")
-        self.network_type_combo.addItem("通用模式", "generic")
+        self.network_type_combo.addItem("Butterfly 网络", "butterfly")
         self.network_type_combo.currentIndexChanged.connect(self._on_network_type_changed)
         type_layout.addWidget(self.network_type_combo)
         type_group.setLayout(type_layout)
         layout.addWidget(type_group)
 
-        # Benes 网络配置
-        self.benes_group = QGroupBox("Benes 网络配置")
+        # 网络规模配置
+        self.benes_group = QGroupBox("网络规模配置")
         benes_layout = QFormLayout()
         self.benes_size_combo = QComboBox()
         for n in [2, 4, 8, 16, 32, 64]:
@@ -993,23 +1000,6 @@ class MainWindow(QMainWindow):
         benes_layout.addRow("网络规模:", self.benes_size_combo)
         self.benes_group.setLayout(benes_layout)
         layout.addWidget(self.benes_group)
-
-        # 通用模式配置
-        self.generic_group = QGroupBox("通用模式配置")
-        generic_layout = QFormLayout()
-        self.num_stages_spin = QSpinBox()
-        self.num_stages_spin.setRange(1, 10)
-        self.num_stages_spin.setValue(3)
-        self.num_stages_spin.valueChanged.connect(self._on_generic_config_changed)
-        generic_layout.addRow("级数:", self.num_stages_spin)
-
-        self.switches_per_stage_spin = QSpinBox()
-        self.switches_per_stage_spin.setRange(1, 32)
-        self.switches_per_stage_spin.setValue(4)
-        self.switches_per_stage_spin.valueChanged.connect(self._on_generic_config_changed)
-        generic_layout.addRow("每级开关数:", self.switches_per_stage_spin)
-        self.generic_group.setLayout(generic_layout)
-        layout.addWidget(self.generic_group)
 
         # 控制位操作
         control_bits_group = QGroupBox("控制位操作")
@@ -1041,6 +1031,12 @@ class MainWindow(QMainWindow):
         self.reset_btn = QPushButton("重置为直通")
         self.reset_btn.clicked.connect(self._reset_to_through)
         action_layout.addWidget(self.reset_btn)
+
+        self.broadcast_btn = QPushButton("Broadcast: 关")
+        self.broadcast_btn.setCheckable(True)
+        self.broadcast_btn.toggled.connect(self._set_broadcast_mode)
+        action_layout.addWidget(self.broadcast_btn)
+
         action_group.setLayout(action_layout)
         layout.addWidget(action_group)
 
@@ -1061,25 +1057,17 @@ class MainWindow(QMainWindow):
 
     def _on_network_type_changed(self):
         """网络类型改变"""
-        self._update_ui_visibility()
         if self.network_type_combo.currentData() == "benes":
             self._switch_to_benes_mode()
         else:
-            self._switch_to_generic_mode()
-
-    def _update_ui_visibility(self):
-        """更新 UI 可见性"""
-        is_benes = self.network_type_combo.currentData() == "benes"
-        self.benes_group.setEnabled(is_benes)
-        self.generic_group.setEnabled(not is_benes)
+            self._switch_to_butterfly_mode()
 
     def _on_benes_size_changed(self):
-        """Benes 网络规模改变"""
-        self._switch_to_benes_mode()
-
-    def _on_generic_config_changed(self):
-        """通用配置改变"""
-        self._switch_to_generic_mode()
+        """网络规模改变"""
+        if self.network_type_combo.currentData() == "benes":
+            self._switch_to_benes_mode()
+        else:
+            self._switch_to_butterfly_mode()
 
     def _switch_to_benes_mode(self):
         """切换到 Benes 模式"""
@@ -1090,14 +1078,19 @@ class MainWindow(QMainWindow):
         self.network_view.set_topology(topology)
         self._update_stats()
 
-    def _switch_to_generic_mode(self):
-        """切换到通用模式"""
-        num_stages = self.num_stages_spin.value()
-        switches_per_stage = self.switches_per_stage_spin.value()
-        topology = GenericTopologyBuilder.build_straight_through(
-            num_stages, switches_per_stage
-        )
+    def _switch_to_butterfly_mode(self):
+        """切换到 Butterfly 模式"""
+        n = self.benes_size_combo.currentData()
+        if n is None:
+            n = 8
+        topology = ButterflyTopologyBuilder.build(n)
         self.network_view.set_topology(topology)
+        self._update_stats()
+
+    def _set_broadcast_mode(self, enabled: bool):
+        """切换 broadcast 数据流语义"""
+        self.broadcast_btn.setText("Broadcast: 开" if enabled else "Broadcast: 关")
+        self.network_view.set_broadcast_mode(enabled)
         self._update_stats()
 
     def _load_control_bits(self):
